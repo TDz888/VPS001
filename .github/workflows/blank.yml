@@ -1,0 +1,132 @@
+name: Create Ubuntu VPS
+
+on:
+  workflow_dispatch:  # Cho phép chạy thủ công
+
+jobs:
+  create-vps:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Setup environment
+      run: |
+        # Cài đặt các công cụ cần thiết
+        sudo apt-get update
+        sudo apt-get install -y sshpass curl wget
+        
+    - name: Create VPS using ngrok/cloudflared
+      run: |
+        # Cài đặt ngrok
+        wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar xvzf ngrok-v3-stable-linux-amd64.tgz
+        sudo mv ngrok /usr/local/bin
+        
+        # Hoặc cài cloudflared (tùy chọn)
+        wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x cloudflared-linux-amd64
+        sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+        
+    - name: Start SSH service
+      run: |
+        # Cài đặt và cấu hình SSH
+        sudo apt-get install -y openssh-server
+        sudo systemctl enable ssh
+        sudo systemctl start ssh
+        
+        # Tạo user mới (thay đổi username nếu muốn)
+        USERNAME="ubuntu-vps"
+        PASSWORD=$(openssl rand -base64 12)
+        
+        # Lưu thông tin để dùng trong step sau
+        echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+        echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+        
+        sudo useradd -m -s /bin/bash $USERNAME
+        echo "$USERNAME:$PASSWORD" | sudo chpasswd
+        sudo usermod -aG sudo $USERNAME
+        
+        # Cho phép SSH password authentication
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo systemctl restart ssh
+        
+    - name: Expose SSH with ngrok
+      run: |
+        # Đăng ký token ngrok miễn phí tại https://dashboard.ngrok.com
+        # Thay YOUR_NGROK_TOKEN bằng token thực tế
+        NGROK_TOKEN="${{ secrets.NGROK_TOKEN }}"
+        
+        if [ -z "$NGROK_TOKEN" ]; then
+          echo "⚠️ Không có NGROK_TOKEN, sử dụng cloudflared thay thế"
+          # Dùng cloudflared nếu không có ngrok token
+          cloudflared tunnel --url ssh://localhost:22 &
+          sleep 5
+          echo "📡 Cloudflared tunnel đang chạy..."
+        else
+          ngrok config add-authtoken $NGROK_TOKEN
+          ngrok tcp 22 --log stdout &
+          sleep 10
+          
+          # Lấy URL ngrok
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          echo "🔗 SSH Connection: $NGROK_URL"
+          echo "SSH_URL=$NGROK_URL" >> $GITHUB_ENV
+        fi
+        
+    - name: Display connection info
+      run: |
+        echo "========================================="
+        echo "✅ UBUNTU VPS ĐÃ SẴN SÀNG!"
+        echo "========================================="
+        echo "🔐 SSH Connection Information:"
+        echo "   Username: $USERNAME"
+        echo "   Password: $PASSWORD"
+        echo ""
+        
+        if [ -n "$SSH_URL" ]; then
+          # Parse ngrok URL (tcp://0.tcp.ngrok.io:12345)
+          HOST=$(echo $SSH_URL | sed 's/tcp:\/\///' | cut -d':' -f1)
+          PORT=$(echo $SSH_URL | cut -d':' -f3)
+          echo "   SSH Command: ssh $USERNAME@$HOST -p $PORT"
+        else
+          echo "   ⚠️ Sử dụng cloudflared, kiểm tra logs để lấy URL"
+        fi
+        
+        echo ""
+        echo "📝 Thông tin đăng nhập:"
+        echo "   IP/Host: $HOST"
+        echo "   Port: $PORT"
+        echo "   User: $USERNAME"
+        echo "   Pass: $PASSWORD"
+        echo "========================================="
+        
+        # Lưu thông tin vào file để download
+        cat > vps-info.txt << EOF
+        =================================
+        UBUNTU VPS INFORMATION
+        =================================
+        Username: $USERNAME
+        Password: $PASSWORD
+        SSH Command: ssh $USERNAME@$HOST -p $PORT
+        Host: $HOST
+        Port: $PORT
+        =================================
+        EOF
+        
+    - name: Upload VPS info
+      uses: actions/upload-artifact@v4
+      with:
+        name: vps-connection-info
+        path: vps-info.txt
+        
+    - name: Keep VPS alive
+      run: |
+        # Giữ cho VPS chạy trong 6 giờ (hoặc tùy chỉnh)
+        echo "🕐 VPS sẽ chạy trong 6 giờ..."
+        echo "Để dừng sớm, hãy cancel workflow này"
+        
+        # Chạy trong 6 giờ (21600 giây)
+        sleep 21600 || true
