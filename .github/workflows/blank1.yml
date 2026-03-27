@@ -1,0 +1,114 @@
+name: Create Ubuntu VPS with SSH
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Username'
+        required: true
+        default: 'ubuntu-vps'
+      duration:
+        description: 'Duration (hours)'
+        required: true
+        default: '6'
+
+jobs:
+  create-vps:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Install required tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openssh-server sshpass curl jq
+        
+    - name: Setup SSH user
+      run: |
+        USERNAME="${{ github.event.inputs.username }}"
+        PASSWORD=$(openssl rand -base64 12)
+        
+        echo "USERNAME=$USERNAME" >> $GITHUB_ENV
+        echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+        
+        sudo useradd -m -s /bin/bash $USERNAME
+        echo "$USERNAME:$PASSWORD" | sudo chpasswd
+        sudo usermod -aG sudo $USERNAME
+        
+    - name: Configure SSH
+      run: |
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo systemctl restart ssh
+        
+    - name: Install and setup ngrok
+      run: |
+        # Tải ngrok
+        wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
+        tar xvzf ngrok-v3-stable-linux-amd64.tgz
+        sudo mv ngrok /usr/local/bin
+        
+        # Đăng nhập ngrok với token
+        ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+        
+    - name: Start ngrok tunnel
+      run: |
+        # Chạy ngrok trong background
+        ngrok tcp 22 --log stdout > ngrok.log 2>&1 &
+        sleep 5
+        
+        # Lấy thông tin từ API ngrok
+        sleep 3
+        NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+        
+        # Parse host và port từ URL (dạng: tcp://0.tcp.ngrok.io:12345)
+        HOST=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d':' -f1)
+        PORT=$(echo $NGROK_URL | cut -d':' -f3)
+        
+        echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+        echo "SSH_HOST=$HOST" >> $GITHUB_ENV
+        echo "SSH_PORT=$PORT" >> $GITHUB_ENV
+        
+    - name: Display connection info
+      run: |
+        echo "========================================="
+        echo "✅ UBUNTU VPS ĐÃ SẴN SÀNG!"
+        echo "========================================="
+        echo ""
+        echo "🔐 SSH CONNECTION INFO:"
+        echo "   Host: $SSH_HOST"
+        echo "   Port: $SSH_PORT"
+        echo "   User: $USERNAME"
+        echo "   Pass: $PASSWORD"
+        echo ""
+        echo "📝 SSH Command:"
+        echo "   ssh $USERNAME@$SSH_HOST -p $SSH_PORT"
+        echo ""
+        echo "========================================="
+        
+        # Tạo file thông tin
+        cat > vps-info.txt << EOF
+UBUNTU VPS CONNECTION INFORMATION
+===================================
+Host: $SSH_HOST
+Port: $SSH_PORT
+Username: $USERNAME
+Password: $PASSWORD
+SSH Command: ssh $USERNAME@$SSH_HOST -p $SSH_PORT
+Created: $(date)
+Duration: ${{ github.event.inputs.duration }} hours
+===================================
+EOF
+        
+    - name: Upload connection info
+      uses: actions/upload-artifact@v4
+      with:
+        name: vps-connection-info
+        path: vps-info.txt
+        
+    - name: Keep VPS alive
+      run: |
+        DURATION_HOURS=${{ github.event.inputs.duration }}
+        DURATION_SECONDS=$((DURATION_HOURS * 3600))
+        echo "🕐 VPS sẽ chạy trong $DURATION_HOURS giờ..."
+        echo "⏰ Sẽ tự động tắt lúc: $(date -d "+$DURATION_HOURS hours")"
+        sleep $DURATION_SECONDS
