@@ -20,7 +20,7 @@ jobs:
     - name: Install required tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y openssh-server sshpass curl jq
+        sudo apt-get install -y openssh-server curl jq
         
     - name: Setup SSH user
       run: |
@@ -40,26 +40,37 @@ jobs:
         sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
         sudo systemctl restart ssh
         
-    - name: Install and setup ngrok
+    - name: Install Cloudflared
       run: |
-        wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz
-        tar xvzf ngrok-v3-stable-linux-amd64.tgz
-        sudo mv ngrok /usr/local/bin
-        ngrok config add-authtoken ${{ secrets.NGROK_TOKEN }}
+        # Tải cloudflared
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x cloudflared-linux-amd64
+        sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+        echo "✅ Cloudflared installed"
         
-    - name: Start ngrok tunnel
+    - name: Start Cloudflare Tunnel
       run: |
-        ngrok tcp 22 --log stdout > ngrok.log 2>&1 &
-        sleep 5
-        sleep 3
-        NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+        # Tạo tunnel đến SSH
+        nohup cloudflared tunnel --url ssh://localhost:22 > cloudflared.log 2>&1 &
         
-        HOST=$(echo $NGROK_URL | sed 's/tcp:\/\///' | cut -d':' -f1)
-        PORT=$(echo $NGROK_URL | cut -d':' -f3)
+        # Đợi tunnel khởi tạo
+        sleep 8
         
-        echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
-        echo "SSH_HOST=$HOST" >> $GITHUB_ENV
-        echo "SSH_PORT=$PORT" >> $GITHUB_ENV
+        # Lấy URL từ log
+        TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' cloudflared.log | head -1)
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          echo "✅ Tunnel created: $TUNNEL_URL"
+        else
+          echo "⚠️ Không tìm thấy URL, hiển thị log:"
+          cat cloudflared.log
+        fi
+        
+    - name: Get Public IP
+      run: |
+        PUBLIC_IP=$(curl -s ifconfig.me)
+        echo "PUBLIC_IP=$PUBLIC_IP" >> $GITHUB_ENV
         
     - name: Display connection info
       run: |
@@ -68,29 +79,82 @@ jobs:
         echo "========================================="
         echo ""
         echo "🔐 SSH CONNECTION INFO:"
-        echo "   Host: $SSH_HOST"
-        echo "   Port: $SSH_PORT"
-        echo "   User: $USERNAME"
-        echo "   Pass: $PASSWORD"
+        echo "   Username: $USERNAME"
+        echo "   Password: $PASSWORD"
         echo ""
-        echo "📝 SSH Command:"
-        echo "   ssh $USERNAME@$SSH_HOST -p $SSH_PORT"
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo "📡 CLOUDFLARE TUNNEL:"
+          echo "   URL: $TUNNEL_URL"
+          echo ""
+          echo "📝 CÁCH KẾT NỐI:"
+          echo "   Cách 1: Dùng Cloudflare Access (khuyến nghị)"
+          echo "     cloudflared access ssh --hostname $TUNNEL_URL"
+          echo ""
+          echo "   Cách 2: Dùng Web-based SSH (dễ nhất)"
+          echo "     Mở trình duyệt: https://one.dash.cloudflare.com/"
+          echo ""
+        fi
+        
+        echo "🌐 PUBLIC IP: $PUBLIC_IP"
         echo ""
         echo "========================================="
         
-        # Tạo file thông tin - SỬ DỤNG CÁCH NÀY
-        {
-          echo "UBUNTU VPS CONNECTION INFORMATION"
-          echo "==================================="
-          echo "Host: $SSH_HOST"
-          echo "Port: $SSH_PORT"
-          echo "Username: $USERNAME"
-          echo "Password: $PASSWORD"
-          echo "SSH Command: ssh $USERNAME@$SSH_HOST -p $SSH_PORT"
-          echo "Created: $(date)"
-          echo "Duration: ${{ github.event.inputs.duration }} hours"
-          echo "==================================="
-        } > vps-info.txt
+        # Tạo file thông tin chi tiết
+        cat > vps-info.txt << 'VPSEOF'
+UBUNTU VPS CONNECTION INFORMATION
+===================================
+Username: $USERNAME
+Password: $PASSWORD
+Public IP: $PUBLIC_IP
+Cloudflare Tunnel: $TUNNEL_URL
+
+CÁCH KẾT NỐI SSH (3 cách):
+===================================
+
+CÁCH 1: Dùng Cloudflare Tunnel (đơn giản nhất)
+-----------------------------------
+1. Cài cloudflared:
+   Windows: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/
+   Linux/Mac: curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+              chmod +x cloudflared
+
+2. Kết nối SSH:
+   cloudflared access ssh --hostname $TUNNEL_URL
+
+3. Nhập username: $USERNAME
+   Nhập password: $PASSWORD
+
+
+CÁCH 2: Dùng ngrok (nếu muốn TCP)
+-----------------------------------
+1. Tải ngrok: https://ngrok.com/download
+2. Chạy: ngrok tcp 22
+3. Kết nối: ssh $USERNAME@[ngrok-host] -p [ngrok-port]
+
+
+CÁCH 3: Dùng Local Port Forwarding
+-----------------------------------
+1. Mở terminal mới, chạy:
+   cloudflared tunnel --url ssh://localhost:22
+
+2. Ở terminal khác, kết nối:
+   ssh $USERNAME@localhost -p 22
+
+
+THÔNG TIN KHÁC:
+===================================
+Created: $(date)
+Duration: ${{ github.event.inputs.duration }} hours
+Status: VPS đang chạy
+VPSEOF
+
+        # Thay thế biến trong file
+        sed -i "s/\$USERNAME/$USERNAME/g" vps-info.txt
+        sed -i "s/\$PASSWORD/$PASSWORD/g" vps-info.txt
+        sed -i "s/\$PUBLIC_IP/$PUBLIC_IP/g" vps-info.txt
+        sed -i "s/\$TUNNEL_URL/${TUNNEL_URL:-'Chưa có tunnel'}/g" vps-info.txt
+        sed -i "s/\$(date)/$(date)/g" vps-info.txt
         
     - name: Upload connection info
       uses: actions/upload-artifact@v4
@@ -103,5 +167,5 @@ jobs:
         DURATION_HOURS=${{ github.event.inputs.duration }}
         DURATION_SECONDS=$((DURATION_HOURS * 3600))
         echo "🕐 VPS sẽ chạy trong $DURATION_HOURS giờ..."
-        echo "⏰ Sẽ tự động tắt lúc: $(date -d "+$DURATION_HOURS hours")"
+        echo "⏰ Sẽ tắt lúc: $(date -d "+$DURATION_HOURS hours")"
         sleep $DURATION_SECONDS
